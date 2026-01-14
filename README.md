@@ -175,5 +175,12 @@ ipykernel==6.29.0
 │  - OpenRouter, Upstash Redis                     │
 └─────────────────────────────────────────────────┘
 ```
+------
 
--------
+🔗 Author
+
+👨‍💻 **Narendran Karthikeyan**
+
+📎 [LinkedIn](https://github.com/iamnarendran) | [GitHub](https://www.linkedin.com/in/narendran-karthikeyan%F0%9F%8C%B3-95862423b)|
+
+------
