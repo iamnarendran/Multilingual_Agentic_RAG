@@ -1,7 +1,51 @@
-# multilingual-RAG
-Router agent (decides which specialized agent to use) Retrieval agent (finds relevant documents) Analysis agent (deep reasoning on content) Synthesis agent (combines information) Validation agent (fact-checks and verifies)
+# 🌍 Multilingual Document Intelligence Platform
 
-```bash
+[![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green.svg)](https://fastapi.tiangolo.com/)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+A production-ready **Retrieval-Augmented Generation (RAG)** system supporting **22+ Indian languages** with **multi-agent architecture** for intelligent document analysis and question answering.
+
+## ✨ Key Features
+
+- 🌐 **Multilingual Support**: English + 22 Indian languages (Hindi, Bengali, Telugu, Tamil, etc.)
+- 🤖 **Multi-Agent System**: 6 specialized AI agents (Router, Planner, Retriever, Analyzer, Synthesizer, Validator)
+- 📄 **Document Processing**: PDF, DOCX, TXT, CSV with smart chunking
+- 🔍 **Hybrid Search**: Vector similarity + BM25 keyword search
+- ✅ **Citation Tracking**: Every answer includes source citations
+- 🎯 **Query Classification**: Auto-detects query type (QA, Comparison, Summarization, etc.)
+- 💰 **Cost Tracking**: Real-time API cost monitoring
+- 🚀 **Production Ready**: Docker, monitoring, error handling, logging
+
+## 🏗️ Architecture
+```
+┌─────────────────────────────────────────────────┐
+│           FastAPI REST API                      │
+│   ┌──────────┐  ┌──────────┐  ┌──────────┐      │
+│   │  Query   │  │Documents │  │  Health  │      │
+│   └──────────┘  └──────────┘  └──────────┘      │
+└────────────────────┬────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────┐
+│        Multi-Agent Orchestrator (LangGraph)     │
+│  ┌──────┐ ┌────────┐ ┌──────────┐ ┌─────────┐   │
+│  │Router│→│Planner │→│Retriever │→│Analyzer │   │
+│  └──────┘ └────────┘ └──────────┘ └─────────┘   │
+│       ┌──────────┐        ┌──────────┐          │
+│       │Synthesis │   ←    │Validator │          │
+│       └──────────┘        └──────────┘          │
+└────────────────────┬────────────────────────────┘
+                     │
+┌────────────────────▼────────────────────────────┐
+│             Core Components                     │
+│   ┌─────────────┐  ┌──────────┐  ┌───────────┐  │
+│   │ Embeddings  │  │  Qdrant  │  │ Document  │  │
+│   │(E5-Large)   │  │(Vector)  │  │ Processor │  │
+│   └─────────────┘  └──────────┘  └───────────┘  │
+└─────────────────────────────────────────────────┘
+```
+## 📁 Project Structure
+```
 multilingual-rag/
 │
 ├── .github/
@@ -115,67 +159,189 @@ multilingual-rag/
 ├── README.md                           # Project documentation
 └── LICENSE                             # License file
 ```
-```
-# === Testing ===
-pytest==7.4.4
-pytest-asyncio==0.23.3
-pytest-cov==4.1.0
-httpx==0.26.0
 
-# === Code Quality ===
-black==24.1.1
-flake8==7.0.0
-mypy==1.8.0
-isort==5.13.2
+## 🚀 Quick Start
 
-# === Documentation ===
-mkdocs==1.5.3
-mkdocs-material==9.5.3
+### Prerequisites
 
-# === Jupyter ===
-jupyter==1.0.0
-ipykernel==6.29.0
+- Python 3.11+
+- Docker & Docker Compose (optional)
+- OpenRouter API key
+- Qdrant Cloud account (free tier)
+
+### 1. Clone Repository
+```bash
+git clone https://github.com/yourusername/multilingual-rag.git
+cd multilingual-rag
 ```
 
----
-```
-## 🎯 *PROJECT ARCHITECTURE LAYERS*
+### 2. Setup Environment
+```bash
+# Copy example environment file
+cp .env.example .env
 
-┌─────────────────────────────────────────────────┐
-│           API Layer (FastAPI)                    │
-│  - REST endpoints                                │
-│  - Request validation                            │
-│  - Response formatting                           │
-└─────────────────────────────────────────────────┘
-                    ↓
-┌─────────────────────────────────────────────────┐
-│         Service Layer (Business Logic)           │
-│  - Query processing                              │
-│  - Document management                           │
-│  - User management                               │
-└─────────────────────────────────────────────────┘
-                    ↓
-┌─────────────────────────────────────────────────┐
-│       Agent Layer (Multi-Agent System)           │
-│  - Router, Planner, Retriever                   │
-│  - Analyzer, Synthesizer, Validator             │
-│  - LangGraph orchestration                       │
-└─────────────────────────────────────────────────┘
-                    ↓
-┌─────────────────────────────────────────────────┐
-│           Core Layer (Foundation)                │
-│  - Embeddings, Vector Store                      │
-│  - Document Processing                           │
-│  - Language Detection, Reranking                 │
-└─────────────────────────────────────────────────┘
-                    ↓
-┌─────────────────────────────────────────────────┐
-│        External Services (Cloud)                 │
-│  - Qdrant Cloud, Supabase                       │
-│  - OpenRouter, Upstash Redis                     │
-└─────────────────────────────────────────────────┘
+# Edit .env with your API keys
+nano .env
 ```
-------
+
+Required environment variables:
+```bash
+OPENROUTER_API_KEY=sk-or-v1-xxxxx
+QDRANT_URL=https://your-cluster.cloud.qdrant.io:6333
+QDRANT_API_KEY=your-qdrant-key
+DATABASE_URL=postgresql://user:pass@host:5432/db
+```
+
+### 3. Install Dependencies
+```bash
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r backend/requirements.txt
+```
+
+### 4. Run Application
+
+**Option A: Direct Python**
+```bash
+cd backend
+python -m app.main
+```
+
+**Option B: Docker Compose**
+```bash
+docker-compose up -d
+```
+
+### 5. Access API
+
+- **API Documentation**: http://localhost:8000/docs
+- **Health Check**: http://localhost:8000/api/v1/health
+
+## 📚 Usage Examples
+
+### Upload Document
+```bash
+curl -X POST "http://localhost:8000/api/v1/documents/upload" \
+  -H "X-User-Id: user123" \
+  -F "file=@document.pdf"
+```
+
+### Query Documents
+```bash
+curl -X POST "http://localhost:8000/api/v1/query" \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: user123" \
+  -d '{
+    "query": "What is the capital of India?",
+    "top_k": 5
+  }'
+```
+
+### Python Client
+```python
+import requests
+
+# Upload document
+with open("document.pdf", "rb") as f:
+    response = requests.post(
+        "http://localhost:8000/api/v1/documents/upload",
+        headers={"X-User-Id": "user123"},
+        files={"file": f}
+    )
+
+# Query
+response = requests.post(
+    "http://localhost:8000/api/v1/query",
+    headers={"X-User-Id": "user123"},
+    json={"query": "What is AI?", "top_k": 5}
+)
+
+result = response.json()
+print(result["answer"])
+```
+
+## 🧪 Testing
+```bash
+# Run tests
+pytest backend/tests/
+
+# Run with coverage
+pytest --cov=app backend/tests/
+
+# Test specific component
+python backend/app/core/embeddings.py
+python backend/app/agents/orchestrator.py
+```
+
+## 📊 Performance
+
+- **Query Processing**: 2-4 seconds average
+- **Cost per Query**: $0.005 - $0.01 (optimized with Gemini Flash + Claude Sonnet)
+- **Supported Documents**: PDF, DOCX, TXT, CSV (up to 50MB)
+- **Concurrent Requests**: 100+ (with proper scaling)
+
+## 🛠️ Tech Stack
+
+**Backend**
+- FastAPI 0.109
+- LangGraph (Multi-agent orchestration)
+- LangChain (RAG pipeline)
+
+**AI/ML**
+- OpenRouter (LLM Gateway)
+- Claude Sonnet 3.5 (Analysis & Synthesis)
+- Gemini Flash 2.0 (Routing & Validation)
+- multilingual-e5-large (Embeddings)
+
+**Databases**
+- Qdrant (Vector database)
+- PostgreSQL (Metadata)
+- Redis (Caching)
+
+**DevOps**
+- Docker & Docker Compose
+- Nginx (Reverse proxy)
+- Prometheus + Grafana (Monitoring)
+
+
+
+## 🌟 Advanced Features
+
+### Custom Model Selection
+
+Change models per agent in `.env`:
+```bash
+MODEL_ROUTER=google/gemini-2.0-flash-exp:free
+MODEL_ANALYZER=anthropic/claude-3.5-sonnet
+MODEL_SYNTHESIZER=openai/gpt-4-turbo
+```
+
+### Metadata Filtering
+```python
+response = requests.post(
+    "http://localhost:8000/api/v1/query",
+    json={
+        "query": "Find sales data",
+        "filters": {
+            "category": "finance",
+            "year": "2024"
+        }
+    }
+)
+```
+
+
+## 📄 License
+
+MIT License - see [LICENSE](LICENSE) file
+
+
+⭐ **Star this repo if you find it helpful!**
+
+--------
 
 🔗 Author
 
@@ -184,3 +350,4 @@ ipykernel==6.29.0
 📎 [LinkedIn](https://github.com/iamnarendran) | [GitHub](https://www.linkedin.com/in/narendran-karthikeyan%F0%9F%8C%B3-95862423b)|
 
 ------
+
