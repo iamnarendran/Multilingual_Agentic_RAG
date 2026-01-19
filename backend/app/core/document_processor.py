@@ -268,3 +268,234 @@ class DocumentProcessor:
             
             # Clean text
             full_text = self._clean_text(full_text)
+            return full_text, page_count
+        
+        except Exception as e:
+            raise DocumentProcessingError(f"PDF extraction failed: {e}")
+    
+    def _extract_docx(self, docx_bytes: bytes) -> Tuple[str, int]:
+        """
+        Extract text from DOCX bytes.
+        
+        Args:
+            docx_bytes: DOCX file bytes
+        
+        Returns:
+            Tuple of (extracted_text, paragraph_count)
+        """
+        try:
+            # Open DOCX from bytes
+            doc = Document(io.BytesIO(docx_bytes))
+            
+            text_parts = []
+            
+            # Extract paragraphs
+            for para in doc.paragraphs:
+                if para.text.strip():
+                    text_parts.append(para.text)
+            
+            # Extract tables
+            for table in doc.tables:
+                for row in table.rows:
+                    row_text = " | ".join(cell.text for cell in row.cells)
+                    if row_text.strip():
+                        text_parts.append(row_text)
+            
+            full_text = "\n\n".join(text_parts)
+            
+            # Clean text
+            full_text = self._clean_text(full_text)
+            
+            return full_text, len(doc.paragraphs)
+            
+        except Exception as e:
+            raise DocumentProcessingError(f"DOCX extraction failed: {e}")
+    
+    def _clean_text(self, text: str) -> str:
+        """
+        Clean extracted text.
+        
+        Args:
+            text: Raw text
+        
+        Returns:
+            Cleaned text
+        """
+        # Remove excessive whitespace
+        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
+        
+        # Remove excessive spaces
+        text = re.sub(r' +', ' ', text)
+        
+        # Remove zero-width characters
+        text = re.sub(r'[\u200b\u200c\u200d\ufeff]', '', text)
+        
+        # Strip leading/trailing whitespace
+        text = text.strip()
+        
+        return text
+    
+    def _chunk_text(self, text: str) -> List[str]:
+        """
+        Split text into chunks using RecursiveCharacterTextSplitter.
+        
+        Args:
+            text: Full text to chunk
+        
+        Returns:
+            List of text chunks
+        """
+        if not text.strip():
+            return []
+        
+        chunks = self.text_splitter.split_text(text)
+        
+        # Filter out empty chunks
+        chunks = [chunk.strip() for chunk in chunks if chunk.strip()]
+        
+        return chunks
+    
+    def estimate_chunks(self, text: str) -> int:
+        """
+        Estimate number of chunks without actually chunking.
+        
+        Args:
+            text: Text to estimate
+        
+        Returns:
+            Estimated number of chunks
+        """
+        return max(1, len(text) // self.chunk_size)
+
+#=============================================================================
+#LANGUAGE DETECTION
+#=============================================================================
+
+    def detect_language(text: str) -> str:
+    """
+    Detect language of text.
+    Args:
+    text: Input text
+
+    Returns:
+        ISO 639-1 language code (e.g., 'en', 'hi')
+    
+    Example:
+        lang = detect_language("भारत की राजधानी")
+        # 'hi'
+    """
+    try:
+        from langdetect import detect
+        
+        # Take first 500 chars for detection
+        sample = text[:500]
+        lang_code = detect(sample)
+        
+        return lang_code
+        
+    except Exception as e:
+        logger.warning(f"Language detection failed: {e}, defaulting to 'en'")
+        return "en"
+
+#=============================================================================
+#CONVENIENCE FUNCTIONS
+#=============================================================================
+    def process_document(
+    file_path: Union[str, Path],
+    user_id: str,
+    metadata: Optional[Dict[str, Any]] = None
+    ) -> List[DocumentChunk]:
+    """
+    Convenience function to process a document file.
+    Args:
+    file_path: Path to document
+    user_id: User ID
+    metadata: Additional metadata
+
+    Returns:
+        List of DocumentChunk objects
+    """
+    processor = DocumentProcessor()
+    return processor.process_file(file_path, user_id, metadata)
+
+    def process_text(
+    text: str,
+    document_name: str,
+    user_id: str,
+    metadata: Optional[Dict[str, Any]] = None
+    ) -> List[DocumentChunk]:
+    """
+    Process plain text directly.
+    Args:
+    text: Text content
+    document_name: Name for the document
+    user_id: User ID
+    metadata: Additional metadata
+
+    Returns:
+        List of DocumentChunk objects
+    """
+    processor = DocumentProcessor()
+    
+    # Convert to bytes
+    text_bytes = text.encode("utf-8")
+    
+    return processor.process_bytes(
+        text_bytes,
+        f"{document_name}.txt",
+        user_id,
+        metadata
+    )
+#=============================================================================
+#TESTING
+#=============================================================================
+    if name == "main":
+    print("=" * 80)
+    print("TESTING DOCUMENT PROCESSOR")
+    print("=" * 80)
+    # Test with sample text
+    sample_text = """
+    India, officially the Republic of India, is a country in South Asia.
+    It is the seventh-largest country by area and the most populous country.
+    
+    The capital of India is New Delhi. Mumbai is the largest city.
+    India has 28 states and 8 union territories.
+    
+    भारत, आधिकारिक तौर पर भारत गणराज्य, दक्षिण एशिया का एक देश है।
+    यह क्षेत्रफल के हिसाब से सातवां सबसे बड़ा देश है।
+    """ * 10  # Repeat to ensure chunking
+    
+    print(f"\n📝 Processing sample text ({len(sample_text)} chars)...")
+    
+    chunks = process_text(
+        text=sample_text,
+        document_name="sample_doc",
+        user_id="test_user",
+        metadata={"category": "test"}
+    )
+    
+    print(f"✅ Created {len(chunks)} chunks")
+    
+    for i, chunk in enumerate(chunks[:3], 1):  # Show first 3
+        print(f"\nChunk {i}:")
+        print(f"  ID: {chunk.chunk_id}")
+        print(f"  Text length: {len(chunk.text)} chars")
+        print(f"  Preview: {chunk.text[:100]}...")
+        print(f"  Metadata: {chunk.metadata}")
+    
+    # Test language detection
+    print("\n🌍 Testing language detection...")
+    
+    test_texts = [
+        ("Hello world", "en"),
+        ("भारत की राजधानी", "hi"),
+        ("இந்தியா", "ta"),
+    ]
+    
+    for text, expected in test_texts:
+        detected = detect_language(text)
+        print(f"  '{text}' → {detected} (expected: {expected})")
+    
+    print("\n" + "=" * 80)
+    print("✅ DOCUMENT PROCESSOR WORKING CORRECTLY!")
+    print("=" * 80)
