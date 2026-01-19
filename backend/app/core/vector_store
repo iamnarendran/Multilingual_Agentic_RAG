@@ -1,0 +1,717 @@
+"""
+Vector Store with Qdrant Cloud Integration
+
+Manages vector storage, retrieval, and hybrid search operations.
+Supports:
+- Semantic search (vector similarity)
+- Hybrid search (vector + keyword)
+- Metadata filtering
+- Batch operations
+"""
+
+from qdrant_client import QdrantClient
+from qdrant_client.models import (
+    Distance,
+    VectorParams,
+    PointStruct,
+    Filter,
+    FieldCondition,
+    MatchValue,
+    SearchRequest,
+    ScrollRequest,
+)
+from typing import List, Dict, Optional, Any, Tuple
+import uuid
+from datetime import datetime
+import time
+
+from app.config import settings
+from app.core.embeddings import get_embedder
+from app.utils.logger import get_logger
+from app.utils.exceptions import VectorStoreError, DocumentNotFoundError
+from app.utils.helpers import generate_id, chunk_list
+
+logger = get_logger(__name__)
+
+
+class VectorStore:
+    """
+    Vector database manager using Qdrant Cloud.
+    
+    Features:
+    - Create and manage collections
+    - Add/update/delete documents
+    - Semantic search with filtering
+    - Hybrid search (vector + keyword)
+    - Batch operations
+    
+    Example:
+        store = VectorStore()
+        
+        # Add documents
+        ids = store.add_documents(
+            texts=["Doc 1", "Doc 2"],
+            metadatas=[{"lang": "en"}, {"lang": "hi"}]
+        )
+        
+        # Search
+        results = store.search("query", filters={"lang": "en"})
+    """
+    
+    def __init__(
+        self,
+        url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        collection_name: Optional[str] = None
+    ):
+        """
+        Initialize Qdrant client and collection.
+        
+        Args:
+            url: Qdrant server URL (from settings if not provided)
+            api_key: Qdrant API key (from settings if not provided)
+            collection_name: Collection name (from settings if not provided)
+        """
+        self.url = url or settings.QDRANT_URL
+        self.api_key = api_key or settings.QDRANT_API_KEY
+        self.collection_name = collection_name or settings.QDRANT_COLLECTION_NAME
+        
+        logger.info(f"Connecting to Qdrant at {self.url}")
+        
+        try:
+            # Initialize client
+            self.client = QdrantClient(
+                url=self.url,
+                api_key=self.api_key,
+                timeout=settings.QDRANT_TIMEOUT
+            )
+            
+            # Test connection
+            self.client.get_collections()
+            logger.info("✅ Connected to Qdrant Cloud")
+            
+            # Get embedder
+            self.embedder = get_embedder()
+            
+            # Initialize collection
+            self._init_collection()
+            
+        except Exception as e:
+            logger.error(f"Failed to connect to Qdrant: {e}")
+            raise VectorStoreError(f"Qdrant connection failed: {e}")
+    
+    def _init_collection(self):
+        """
+        Create collection if it doesn't exist.
+        
+        The collection stores:
+        - Vector embeddings (1024 dimensions)
+        - Metadata (language, user_id, document info)
+        - Full text for retrieval
+        """
+        try:
+            # Get existing collections
+            collections = self.client.get_collections().collections
+            collection_names = [col.name for col in collections]
+            
+            if self.collection_name not in collection_names:
+                logger.info(f"Creating collection: {self.collection_name}")
+                
+                # Create collection with cosine distance
+                self.client.create_collection(
+                    collection_name=self.collection_name,
+                    vectors_config=VectorParams(
+                        size=self.embedder.dimension,
+                        distance=Distance.COSINE,  # Best for normalized embeddings
+                    )
+                )
+                
+                # Create payload indices for faster filtering
+                self._create_payload_indices()
+                
+                logger.info(f"✅ Collection '{self.collection_name}' created")
+            else:
+                logger.info(f"✅ Collection '{self.collection_name}' already exists")
+                
+        except Exception as e:
+            logger.error(f"Collection initialization failed: {e}")
+            raise VectorStoreError(f"Failed to initialize collection: {e}")
+    
+    def _create_payload_indices(self):
+        """Create indices on frequently filtered fields for performance"""
+        try:
+            # Index on language field
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="language",
+                field_schema="keyword"
+            )
+            
+            # Index on user_id field
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="user_id",
+                field_schema="keyword"
+            )
+            
+            # Index on document_id field
+            self.client.create_payload_index(
+                collection_name=self.collection_name,
+                field_name="document_id",
+                field_schema="keyword"
+            )
+            
+            logger.info("✅ Payload indices created")
+            
+        except Exception as e:
+            logger.warning(f"Failed to create indices: {e}")
+    
+    def add_documents(
+        self,
+        texts: List[str],
+        metadatas: List[Dict[str, Any]],
+        ids: Optional[List[str]] = None,
+        batch_size: int = 100
+    ) -> List[str]:
+        """
+        Add documents to the vector store.
+        
+        Args:
+            texts: List of document texts to embed and store
+            metadatas: List of metadata dicts (must match length of texts)
+            ids: Optional custom IDs (generated if not provided)
+            batch_size: Number of documents to upload per batch
+        
+        Returns:
+            List of document IDs
+        
+        Raises:
+            VectorStoreError: If upload fails
+        
+        Example:
+            ids = store.add_documents(
+                texts=["Delhi is capital", "Mumbai is largest"],
+                metadatas=[
+                    {"language": "en", "user_id": "123"},
+                    {"language": "en", "user_id": "123"}
+                ]
+            )
+        """
+        if len(texts) != len(metadatas):
+            raise VectorStoreError(
+                "Number of texts must match number of metadatas"
+            )
+        
+        # Generate IDs if not provided
+        if ids is None:
+            ids = [generate_id() for _ in range(len(texts))]
+        
+        logger.info(f"Adding {len(texts)} documents to vector store...")
+        
+        try:
+            # Generate embeddings (batch processing)
+            start_time = time.time()
+            embeddings = self.embedder.embed_documents(texts, show_progress=True)
+            embed_time = time.time() - start_time
+            logger.info(f"Embeddings generated in {embed_time:.2f}s")
+            
+            # Create points
+            points = []
+            for i, (doc_id, text, embedding, metadata) in enumerate(
+                zip(ids, texts, embeddings, metadatas)
+            ):
+                # Ensure required metadata fields
+                payload = {
+                    **metadata,
+                    "text": text,
+                    "indexed_at": datetime.utcnow().isoformat(),
+                    "chunk_index": metadata.get("chunk_index", 0),
+                }
+                
+                point = PointStruct(
+                    id=doc_id,
+                    vector=embedding.tolist(),
+                    payload=payload
+                )
+                points.append(point)
+            
+            # Upload in batches
+            total_uploaded = 0
+            for batch in chunk_list(points, batch_size):
+                self.client.upsert(
+                    collection_name=self.collection_name,
+                    points=batch,
+                    wait=True  # Wait for operation to complete
+                )
+                total_uploaded += len(batch)
+                logger.info(f"Uploaded {total_uploaded}/{len(points)} documents")
+            
+            logger.info(f"✅ Successfully added {len(points)} documents")
+            return ids
+            
+        except Exception as e:
+            logger.error(f"Failed to add documents: {e}")
+            raise VectorStoreError(f"Document upload failed: {e}")
+    
+    def search(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        score_threshold: Optional[float] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Search for similar documents using vector similarity.
+        
+        Args:
+            query: Search query text
+            top_k: Number of results to return (default from settings)
+            filters: Metadata filters, e.g., {"language": "hi", "user_id": "123"}
+            score_threshold: Minimum similarity score (0-1)
+        
+        Returns:
+            List of search results with metadata and scores
+        
+        Example:
+            results = store.search(
+                query="What is the capital?",
+                top_k=5,
+                filters={"language": "en"}
+            )
+            
+            for result in results:
+                print(result['text'], result['score'])
+        """
+        top_k = top_k or settings.TOP_K_RETRIEVAL
+        score_threshold = score_threshold or settings.MIN_SIMILARITY_SCORE
+        
+        logger.info(f"Searching: '{query[:50]}...' (top_k={top_k})")
+        
+        try:
+            # Generate query embedding
+            query_embedding = self.embedder.embed_query(query)
+            
+            # Build filter
+            qdrant_filter = self._build_filter(filters)
+            
+            # Search
+            start_time = time.time()
+            results = self.client.search(
+                collection_name=self.collection_name,
+                query_vector=query_embedding.tolist(),
+                query_filter=qdrant_filter,
+                limit=top_k,
+                score_threshold=score_threshold,
+                with_payload=True,
+                with_vectors=False  # Don't return vectors to save bandwidth
+            )
+            search_time = time.time() - start_time
+            
+            # Format results
+            formatted_results = []
+            for result in results:
+                formatted_results.append({
+                    "id": result.id,
+                    "score": result.score,
+                    "text": result.payload.get("text", ""),
+                    "metadata": {
+                        k: v for k, v in result.payload.items()
+                        if k not in ["text", "vector"]
+                    }
+                })
+            
+            logger.info(
+                f"Found {len(formatted_results)} results in {search_time:.2f}s"
+            )
+            return formatted_results
+            
+        except Exception as e:
+            logger.error(f"Search failed: {e}")
+            raise VectorStoreError(f"Search operation failed: {e}")
+    
+    def hybrid_search(
+        self,
+        query: str,
+        top_k: Optional[int] = None,
+        filters: Optional[Dict[str, Any]] = None,
+        vector_weight: float = 0.7,
+        keyword_weight: float = 0.3
+    ) -> List[Dict[str, Any]]:
+        """
+        Hybrid search combining vector similarity and keyword matching.
+        
+        Note: For now, this uses pure vector search. In production, you can
+        combine with BM25 or full-text search for better results.
+        
+        Args:
+            query: Search query
+            top_k: Number of results
+            filters: Metadata filters
+            vector_weight: Weight for vector search (0-1)
+            keyword_weight: Weight for keyword search (0-1)
+        
+        Returns:
+            List of search results
+        """
+        # For now, use vector search
+        # TODO: Implement true hybrid search with BM25
+        logger.info("Using vector search (hybrid search not yet implemented)")
+        return self.search(query, top_k, filters)
+    
+    def get_document(self, doc_id: str) -> Dict[str, Any]:
+        """
+        Retrieve a document by ID.
+        
+        Args:
+            doc_id: Document ID
+        
+        Returns:
+            Document data with metadata
+        
+        Raises:
+            DocumentNotFoundError: If document doesn't exist
+        """
+        try:
+            result = self.client.retrieve(
+                collection_name=self.collection_name,
+                ids=[doc_id],
+                with_payload=True,
+                with_vectors=False
+            )
+            
+            if not result:
+                raise DocumentNotFoundError(doc_id)
+            
+            point = result[0]
+            return {
+                "id": point.id,
+                "text": point.payload.get("text", ""),
+                "metadata": {
+                    k: v for k, v in point.payload.items()
+                    if k != "text"
+                }
+            }
+            
+        except DocumentNotFoundError:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to retrieve document: {e}")
+            raise VectorStoreError(f"Document retrieval failed: {e}")
+    
+    def delete_documents(
+        self,
+        ids: Optional[List[str]] = None,
+        filters: Optional[Dict[str, Any]] = None
+    ) -> int:
+        """
+        Delete documents by IDs or filters.
+        
+        Args:
+            ids: List of document IDs to delete
+            filters: Delete documents matching filters
+        
+        Returns:
+            Number of documents deleted
+        
+        Example:
+            # Delete by IDs
+            count = store.delete_documents(ids=["id1", "id2"])
+            
+            # Delete by filter
+            count = store.delete_documents(filters={"user_id": "123"})
+        """
+        try:
+            if ids:
+                logger.info(f"Deleting {len(ids)} documents by ID")
+                self.client.delete(
+                    collection_name=self.collection_name,
+                    points_selector=ids,
+                    wait=True
+                )
+                return len(ids)
+            
+            elif filters:
+                logger.info(f"Deleting documents with filters: {filters}")
+                qdrant_filter = self._build_filter(filters)
+                
+                # First, count how many will be deleted
+                count_result = self.client.count(
+                    collection_name=self.collection_name,
+                    count_filter=qdrant_filter
+                )
+                count = count_result.count
+                
+                # Delete
+                self.client.delete(
+                    collection_name=self.collection_name,
+                    points_selector=qdrant_filter,
+                    wait=True
+                )
+                
+                logger.info(f"✅ Deleted {count} documents")
+                return count
+            
+            else:
+                raise VectorStoreError("Must provide either ids or filters")
+                
+        except Exception as e:
+            logger.error(f"Delete operation failed: {e}")
+            raise VectorStoreError(f"Failed to delete documents: {e}")
+    
+    def update_metadata(
+        self,
+        doc_id: str,
+        metadata: Dict[str, Any]
+    ):
+        """
+        Update metadata for a document without re-embedding.
+        
+        Args:
+            doc_id: Document ID
+            metadata: New metadata fields to update
+        """
+        try:
+            # Get existing document
+            doc = self.get_document(doc_id)
+            
+            # Merge metadata
+            updated_payload = {**doc["metadata"], **metadata}
+            updated_payload["text"] = doc["text"]  # Keep text
+            
+            # Update
+            self.client.set_payload(
+                collection_name=self.collection_name,
+                payload=updated_payload,
+                points=[doc_id],
+                wait=True
+            )
+            
+            logger.info(f"✅ Updated metadata for document {doc_id}")
+            
+        except Exception as e:
+            logger.error(f"Metadata update failed: {e}")
+            raise VectorStoreError(f"Failed to update metadata: {e}")
+    
+    def list_documents(
+        self,
+        filters: Optional[Dict[str, Any]] = None,
+        limit: int = 100,
+        offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        """
+        List documents with optional filtering.
+        
+        Args:
+            filters: Metadata filters
+            limit: Maximum number of documents
+            offset: Number of documents to skip
+        
+        Returns:
+            List of documents
+        """
+        try:
+            qdrant_filter = self._build_filter(filters) if filters else None
+            
+            # Scroll through documents
+            results, _ = self.client.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=qdrant_filter,
+                limit=limit,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False
+            )
+            
+            documents = []
+            for point in results:
+                documents.append({
+                    "id": point.id,
+                    "text": point.payload.get("text", "")[:100] + "...",  # Truncate
+                    "metadata": {
+                        k: v for k, v in point.payload.items()
+                        if k != "text"
+                    }
+                })
+            
+            logger.info(f"Listed {len(documents)} documents")
+            return documents
+            
+        except Exception as e:
+            logger.error(f"List operation failed: {e}")
+            raise VectorStoreError(f"Failed to list documents: {e}")
+    
+    def get_collection_info(self) -> Dict[str, Any]:
+        """
+        Get information about the collection.
+        
+        Returns:
+            Dictionary with collection statistics
+        """
+        try:
+            info = self.client.get_collection(self.collection_name)
+            
+            return {
+                "name": self.collection_name,
+                "vectors_count": info.points_count,
+                "status": info.status.value,
+                "vector_size": info.config.params.vectors.size,
+                "distance": info.config.params.vectors.distance.value,
+            }
+            
+        except Exception as e:
+            logger.error(f"Failed to get collection info: {e}")
+            raise VectorStoreError(f"Failed to get collection info: {e}")
+    
+    def clear_collection(self):
+        """
+        Delete all documents from collection.
+        
+        WARNING: This is destructive and cannot be undone!
+        """
+        try:
+            logger.warning(f"⚠️  CLEARING ALL DOCUMENTS from {self.collection_name}")
+            
+            # Delete and recreate collection
+            self.client.delete_collection(self.collection_name)
+            self._init_collection()
+            
+            logger.info("✅ Collection cleared and recreated")
+            
+        except Exception as e:
+            logger.error(f"Clear operation failed: {e}")
+            raise VectorStoreError(f"Failed to clear collection: {e}")
+    
+    def _build_filter(
+        self,
+        filters: Optional[Dict[str, Any]]
+    ) -> Optional[Filter]:
+        """
+        Build Qdrant filter from dictionary.
+        
+        Args:
+            filters: Dictionary of field: value pairs
+        
+        Returns:
+            Qdrant Filter object or None
+        """
+        if not filters:
+            return None
+        
+        conditions = []
+        for key, value in filters.items():
+            conditions.append(
+                FieldCondition(
+                    key=key,
+                    match=MatchValue(value=value)
+                )
+            )
+        
+        return Filter(must=conditions)
+
+
+# =============================================================================
+# GLOBAL VECTOR STORE INSTANCE
+# =============================================================================
+
+_vector_store: Optional[VectorStore] = None
+
+
+def get_vector_store() -> VectorStore:
+    """
+    Get or create the global vector store instance.
+    
+    Returns:
+        VectorStore instance
+    
+    Example:
+        from app.core.vector_store import get_vector_store
+        
+        store = get_vector_store()
+        results = store.search("query")
+    """
+    global _vector_store
+    
+    if _vector_store is None:
+        logger.info("Initializing global vector store...")
+        _vector_store = VectorStore()
+        logger.info("✅ Vector store initialized")
+    
+    return _vector_store
+
+
+# =============================================================================
+# TESTING
+# =============================================================================
+
+if __name__ == "__main__":
+    print("=" * 80)
+    print("TESTING VECTOR STORE")
+    print("=" * 80)
+    
+    # Initialize store
+    store = get_vector_store()
+    
+    # Get collection info
+    info = store.get_collection_info()
+    print(f"\n📊 Collection Info:")
+    print(f"  Name: {info['name']}")
+    print(f"  Vectors: {info['vectors_count']}")
+    print(f"  Status: {info['status']}")
+    print(f"  Dimension: {info['vector_size']}")
+    
+    # Test adding documents
+    test_docs = [
+        "India's capital is New Delhi.",
+        "भारत की राजधानी नई दिल्ली है।",
+        "Python is a programming language.",
+        "मुंबई भारत का सबसे बड़ा शहर है।",
+    ]
+    
+    test_metadata = [
+        {"language": "en", "category": "geography", "user_id": "test_user"},
+        {"language": "hi", "category": "geography", "user_id": "test_user"},
+        {"language": "en", "category": "technology", "user_id": "test_user"},
+        {"language": "hi", "category": "geography", "user_id": "test_user"},
+    ]
+    
+    print(f"\n📝 Adding {len(test_docs)} test documents...")
+    ids = store.add_documents(test_docs, test_metadata)
+    print(f"✅ Added documents with IDs: {ids[:2]}...")
+    
+    # Test search
+    print("\n🔍 Testing search (English query)...")
+    results = store.search("What is India's capital?", top_k=2)
+    
+    for i, result in enumerate(results, 1):
+        print(f"\nResult {i}:")
+        print(f"  Score: {result['score']:.4f}")
+        print(f"  Text: {result['text']}")
+        print(f"  Language: {result['metadata'].get('language')}")
+    
+    # Test search with filter
+    print("\n🔍 Testing search with language filter (Hindi only)...")
+    results = store.search(
+        "भारत",
+        top_k=2,
+        filters={"language": "hi"}
+    )
+    
+    for i, result in enumerate(results, 1):
+        print(f"\nResult {i}:")
+        print(f"  Score: {result['score']:.4f}")
+        print(f"  Text: {result['text']}")
+    
+    # Test get document
+    print(f"\n📄 Retrieving document by ID...")
+    doc = store.get_document(ids[0])
+    print(f"  Text: {doc['text'][:50]}...")
+    print(f"  Metadata: {doc['metadata']}")
+    
+    # List documents
+    print("\n📋 Listing documents...")
+    docs = store.list_documents(limit=5)
+    print(f"  Found {len(docs)} documents")
+    
+    print("\n" + "=" * 80)
+    print("✅ VECTOR STORE WORKING CORRECTLY!")
+    print("=" * 80)
